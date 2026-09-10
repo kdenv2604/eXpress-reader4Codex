@@ -1,0 +1,11 @@
+* text=auto
+*.cmd text eol=crlf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Third-party code bundled by esbuild can contain intentional trailing spaces in string literals.
+plugins/express-reader/dist/server.cjs -diff -whitespace linguist-generated=true

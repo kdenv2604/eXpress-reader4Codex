@@ -1,0 +1,27 @@
+{
+  "name": "express-reader4codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local read-only eXpress bridge for Codex",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "configure": "node scripts/configure.mjs",
+    "build": "node scripts/build.mjs",
+    "check": "node --check src/server.mjs && node --check src/reader.mjs && node --check src/ui-reader.mjs",
+    "test": "node --test",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:mcp": "node scripts/mcp-smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "playwright-core": "^1.63.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

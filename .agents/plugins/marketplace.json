@@ -1,0 +1,20 @@
+{
+  "name": "express-reader4codex",
+  "interface": {
+    "displayName": "eXpress Reader for Codex"
+  },
+  "plugins": [
+    {
+      "name": "express-reader",
+      "source": {
+        "source": "local",
+        "path": "./plugins/express-reader"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

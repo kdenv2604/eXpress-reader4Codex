@@ -1,0 +1,29 @@
+{
+  "name": "express-reader",
+  "version": "0.1.0+codex.20260910105825",
+  "description": "Read-only access to eXpress conversations from Codex",
+  "author": {
+    "name": "kdenv2604",
+    "url": "https://github.com/kdenv2604"
+  },
+  "homepage": "https://github.com/kdenv2604/eXpress-reader4Codex",
+  "repository": "https://github.com/kdenv2604/eXpress-reader4Codex",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "eXpress Reader",
+    "shortDescription": "Read and organize eXpress conversations.",
+    "longDescription": "A local, read-only bridge for reviewing eXpress chats in Codex without sending messages or reactions.",
+    "developerName": "kdenv2604",
+    "category": "Productivity",
+    "capabilities": [
+      "Read-only",
+      "Local"
+    ],
+    "defaultPrompt": [
+      "Summarize my unread eXpress conversations.",
+      "Find open questions in my eXpress chats.",
+      "Show threads that may need my reply."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

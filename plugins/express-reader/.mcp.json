@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "express_reader": {
+      "command": "cmd.exe",
+      "args": [
+        "/d",
+        "/s",
+        "/c",
+        "call",
+        "./scripts/launch-express-reader.cmd"
+      ],
+      "cwd": ".",
+      "enabled": true,
+      "env_vars": [
+        "CODEX_MCP_NODE_PATH",
+        "EXPRESS_WEB_URL",
+        "EXPRESS_CORPORATE_SERVER_URL",
+        "EXPRESS_READER_DATA_DIR",
+        "EXPRESS_BROWSER",
+        "EXPRESS_BROWSER_HEADLESS"
+      ],
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 180
+    }
+  }
+}
