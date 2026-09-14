@@ -147,6 +147,26 @@ async function domChatCandidates(page, limit = 100) {
   );
 }
 
+async function domTabCandidates(page, limit = 20) {
+  return domSnapshotElements(
+    page,
+    ({ attributes }) => attributes.class?.split(/\s+/).includes("tab"),
+    limit,
+    200,
+  );
+}
+
+async function domThreadHeaderCandidates(page, limit = 5) {
+  return domSnapshotElements(
+    page,
+    ({ attributes }) =>
+      attributes["data-chat-type"] === "thread" &&
+      attributes.class?.split(/\s+/).includes("chat-header"),
+    limit,
+    500,
+  );
+}
+
 async function domMessageCandidates(page, limit = 100) {
   return domSnapshotElements(
     page,
@@ -328,6 +348,22 @@ function parseChatRow(row) {
   };
 }
 
+function parseThreadRow(row) {
+  const lines = row.text.split("\n").map(normalizeText).filter(Boolean);
+  const timeIndex = lines.findIndex((line) => CHAT_TIME_PATTERN.test(line));
+  const chatTitle = timeIndex > 0 ? lines.slice(0, timeIndex).join(" ") : lines[0];
+  const topic = timeIndex >= 0 ? lines[timeIndex + 1] : lines[1];
+  if (!chatTitle || !topic) return null;
+
+  return {
+    chatTitle,
+    updatedAt: timeIndex >= 0 ? lines[timeIndex] : null,
+    topic,
+    preview: lines.slice(timeIndex >= 0 ? timeIndex + 2 : 2).join(" | ") || null,
+    visibleText: row.text,
+  };
+}
+
 export function clipText(value, maxChars) {
   const text = normalizeText(value);
   if (text.length <= maxChars) return text;
@@ -500,6 +536,20 @@ export async function listChats(page, limit = 100) {
   return listChatsGeneric(await resolveAppSurface(page), limit);
 }
 
+export async function listThreads(page, limit = 100) {
+  const previousTab = await selectedChatListTab(page);
+  await selectChatListTab(page, "Обсуждения");
+  try {
+    const rows = await waitForChatRows(page, Math.max(limit, 100));
+    const threads = rows.map(parseThreadRow).filter(Boolean).slice(0, limit);
+    return { threads, detection: "express-dom-snapshot" };
+  } finally {
+    if (previousTab && normalizeText(previousTab) !== "Обсуждения") {
+      await selectChatListTab(page, previousTab).catch(() => {});
+    }
+  }
+}
+
 async function clickBackendNode(page, backendDOMNodeId) {
   const session = await page.context().newCDPSession(page);
   try {
@@ -519,6 +569,72 @@ async function clickBackendNode(page, backendDOMNodeId) {
   } finally {
     await session.detach();
   }
+}
+
+async function clickBackendNodeDescendant(page, backendDOMNodeId, selector) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { object } = await session.send("DOM.resolveNode", { backendNodeId: backendDOMNodeId });
+    const { result } = await session.send("Runtime.callFunctionOn", {
+      objectId: object.objectId,
+      returnByValue: true,
+      arguments: [{ value: selector }],
+      functionDeclaration: `function (selector) {
+        const target = this.querySelector(selector);
+        if (!target) return false;
+        target.click();
+        return true;
+      }`,
+    });
+    return result.value === true;
+  } finally {
+    await session.detach();
+  }
+}
+
+async function selectedChatListTab(page) {
+  const selected = (await domTabCandidates(page)).find((candidate) =>
+    candidate.className?.split(/\s+/).includes("tab--selected"));
+  return selected?.text || null;
+}
+
+async function waitForChatListTabs(page, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  let tabs = [];
+  do {
+    tabs = await domTabCandidates(page);
+    if (tabs.length) return tabs;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  return tabs;
+}
+
+async function selectChatListTab(page, title, timeoutMs = 10_000) {
+  const normalizedTitle = normalizeText(title).toLocaleLowerCase();
+  const tabs = await waitForChatListTabs(page);
+  const tab = tabs.find((candidate) =>
+    normalizeText(candidate.text).toLocaleLowerCase() === normalizedTitle);
+  if (!tab) throw new Error(`The eXpress tab "${title}" was not found.`);
+  if (tab.className?.split(/\s+/).includes("tab--selected")) return;
+
+  await clickBackendNode(page, tab.backendDOMNodeId);
+  const deadline = Date.now() + timeoutMs;
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const selected = await selectedChatListTab(page);
+    if (normalizeText(selected).toLocaleLowerCase() === normalizedTitle) return;
+  } while (Date.now() < deadline);
+  throw new Error(`The eXpress tab "${title}" did not become active.`);
+}
+
+async function waitForThreadHeader(page, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const header = (await domThreadHeaderCandidates(page, 1))[0];
+    if (header) return header;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  } while (Date.now() < deadline);
+  throw new Error("The eXpress thread did not open.");
 }
 
 async function clickChatByTitle(page, surface, title) {
@@ -623,6 +739,105 @@ async function scrollUp(surface) {
   });
 }
 
+async function collectDomMessageHistory(page, historyPages, messageLimit) {
+  const collected = new Map();
+  for (let pageIndex = 0; pageIndex < historyPages; pageIndex += 1) {
+    for (const message of await extractDomMessages(page, Math.max(messageLimit, 500))) {
+      const key = `${message.timestamp || ""}\n${message.direction || ""}\n${message.sender || ""}\n${message.text}`;
+      collected.set(key, message);
+    }
+    if (pageIndex + 1 >= historyPages) break;
+    const movement = await scrollMessageHistory(page);
+    if (!movement || movement.before === movement.after || movement.atTop) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return [...collected.values()].sort((left, right) =>
+    messageSortValue(left) - messageSortValue(right));
+}
+
+export async function closeThread(page, restoreTab = "Все чаты") {
+  const header = (await domThreadHeaderCandidates(page, 1))[0];
+  if (!header) {
+    if (restoreTab) await selectChatListTab(page, restoreTab).catch(() => {});
+    return { closed: false, reason: "no-thread-open", restoredTab: restoreTab || null };
+  }
+
+  const clicked = await clickBackendNodeDescendant(page, header.backendDOMNodeId, "button");
+  if (!clicked) throw new Error("The open eXpress thread has no close control.");
+
+  const deadline = Date.now() + 10_000;
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if ((await domThreadHeaderCandidates(page, 1)).length === 0) break;
+  } while (Date.now() < deadline);
+  if ((await domThreadHeaderCandidates(page, 1)).length) {
+    throw new Error("The eXpress thread close control did not close the thread.");
+  }
+
+  if (restoreTab) await selectChatListTab(page, restoreTab).catch(() => {});
+  return { closed: true, restoredTab: restoreTab || null };
+}
+
+export async function readThread(
+  page,
+  {
+    query,
+    chatTitle = null,
+    historyPages = 4,
+    messageLimit = 200,
+    closeAfter = true,
+  },
+  assertAllowed = null,
+) {
+  await closeThread(page, null);
+  const previousTab = await selectedChatListTab(page);
+  await selectChatListTab(page, "Обсуждения");
+
+  try {
+    const rows = await waitForChatRows(page, 300);
+    const candidates = rows.map((row) => ({ row, thread: parseThreadRow(row) })).filter(({ thread }) => thread);
+    const normalizedQuery = normalizeText(query).toLocaleLowerCase();
+    const normalizedChatTitle = normalizeText(chatTitle).toLocaleLowerCase();
+    const matches = candidates.filter(({ thread }) => {
+      if (normalizedChatTitle && thread.chatTitle.toLocaleLowerCase() !== normalizedChatTitle) return false;
+      return thread.topic.toLocaleLowerCase() === normalizedQuery ||
+        thread.visibleText.toLocaleLowerCase().includes(normalizedQuery);
+    });
+    const selected = matches.find(({ thread }) => thread.topic.toLocaleLowerCase() === normalizedQuery) || matches[0];
+    if (!selected) {
+      throw new Error(`A visible eXpress thread matching "${query}" was not found. Use express_list_threads first.`);
+    }
+
+    await clickBackendNode(page, selected.row.backendDOMNodeId);
+    await waitForThreadHeader(page);
+    await assertAllowed?.();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    const allMessages = await collectDomMessageHistory(page, historyPages, messageLimit);
+    const parentIndex = allMessages.findIndex((message) =>
+      normalizeText(message.text).toLocaleLowerCase() === selected.thread.topic.toLocaleLowerCase());
+    const fallbackParentIndex = allMessages.length ? 0 : -1;
+    const actualParentIndex = parentIndex >= 0 ? parentIndex : fallbackParentIndex;
+    const parent = actualParentIndex >= 0 ? allMessages[actualParentIndex] : null;
+    const messages = allMessages.filter((_, index) => index !== actualParentIndex);
+
+    return {
+      thread: selected.thread,
+      parent,
+      messages: messages.slice(-messageLimit),
+      messageCount: Math.min(messages.length, messageLimit),
+      loadedMessageCount: messages.length,
+      detection: "express-dom-snapshot",
+      closedAfterRead: closeAfter,
+      note: "Opening a thread can mark its messages as read in eXpress.",
+    };
+  } finally {
+    if (closeAfter) {
+      await closeThread(page, previousTab || "Все чаты");
+    }
+  }
+}
+
 export async function readChat(
   page,
   title,
@@ -635,21 +850,8 @@ export async function readChat(
   await assertAllowed?.();
   await new Promise((resolve) => setTimeout(resolve, 750));
 
-  const domCollected = new Map();
-  for (let pageIndex = 0; pageIndex < historyPages; pageIndex += 1) {
-    for (const message of await extractDomMessages(page, Math.max(messageLimit, 500))) {
-      const key = `${message.timestamp || ""}\n${message.direction || ""}\n${message.sender || ""}\n${message.text}`;
-      domCollected.set(key, message);
-    }
-    if (pageIndex + 1 >= historyPages) break;
-    const movement = await scrollMessageHistory(page);
-    if (!movement || movement.before === movement.after || movement.atTop) break;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-
-  if (domCollected.size) {
-    const domMessages = [...domCollected.values()].sort((left, right) =>
-      messageSortValue(left) - messageSortValue(right));
+  const domMessages = await collectDomMessageHistory(page, historyPages, messageLimit);
+  if (domMessages.length) {
     return {
       chat: title,
       messages: domMessages.slice(-messageLimit),

@@ -1,6 +1,6 @@
 {
   "name": "express-reader",
-  "version": "0.1.0+codex.20260910105825",
+  "version": "0.1.0+codex.20260914085924",
   "description": "Read-only access to eXpress conversations from Codex",
   "author": {
     "name": "kdenv2604",

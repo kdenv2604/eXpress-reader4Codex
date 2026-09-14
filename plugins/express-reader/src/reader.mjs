@@ -1,6 +1,14 @@
 import { BrowserSession } from "./browser-session.mjs";
 import { loadConfig, saveConfig } from "./config.mjs";
-import { inspectUi, listChats, prepareCorporateLogin, readChat } from "./ui-reader.mjs";
+import {
+  closeThread,
+  inspectUi,
+  listChats,
+  listThreads,
+  prepareCorporateLogin,
+  readChat,
+  readThread,
+} from "./ui-reader.mjs";
 
 export class ExpressReader {
   #browser = new BrowserSession();
@@ -48,6 +56,10 @@ export class ExpressReader {
     return listChats(await this.#browser.pageForReading(), limit);
   }
 
+  async listThreads(limit) {
+    return listThreads(await this.#browser.pageForReading(), limit);
+  }
+
   async readChat(title, historyPages, messageLimit) {
     const page = await this.#browser.pageForReading();
     const result = await readChat(
@@ -59,6 +71,22 @@ export class ExpressReader {
     );
     if (result.messages.length) this.#sessionMessages.set(title, result.messages);
     return result;
+  }
+
+  async readThread(input) {
+    const page = await this.#browser.pageForReading();
+    const result = await readThread(page, input, () => this.#browser.assertPageAllowed(page));
+    if (result.messages.length) {
+      this.#sessionMessages.set(
+        `thread:${result.thread.chatTitle}:${result.thread.topic}`,
+        result.messages,
+      );
+    }
+    return result;
+  }
+
+  async closeThread() {
+    return closeThread(await this.#browser.pageForReading());
   }
 
   async searchLoaded(query, limit) {

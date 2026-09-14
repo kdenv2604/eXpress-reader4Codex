@@ -80,6 +80,18 @@ export function createServer() {
   );
 
   server.registerTool(
+    "express_list_threads",
+    {
+      description: "List visible eXpress discussions with their source chat, topic, update time, and latest preview. Restores the previous chat-list tab afterward.",
+      inputSchema: z.object({
+        limit: z.number().int().min(1).max(300).default(100),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    safely(({ limit }) => reader.listThreads(limit)),
+  );
+
+  server.registerTool(
     "express_read_chat",
     {
       description: "Open and read one eXpress chat. This cannot send content, but opening the chat may mark messages as read.",
@@ -91,6 +103,32 @@ export function createServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     safely(({ title, historyPages, messageLimit }) => reader.readChat(title, historyPages, messageLimit)),
+  );
+
+  server.registerTool(
+    "express_read_thread",
+    {
+      description: "Find an eXpress discussion by topic text, open it, read its messages, and close it afterward by default. Opening a thread may mark its messages as read.",
+      inputSchema: z.object({
+        query: z.string().min(1),
+        chatTitle: z.string().min(1).optional(),
+        historyPages: z.number().int().min(1).max(20).default(4),
+        messageLimit: z.number().int().min(1).max(1000).default(200),
+        closeAfter: z.boolean().default(true),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    safely((input) => reader.readThread(input)),
+  );
+
+  server.registerTool(
+    "express_close_thread",
+    {
+      description: "Close the currently open eXpress discussion and restore the main chat list. Does not send or modify messages.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    safely(() => reader.closeThread()),
   );
 
   server.registerTool(
