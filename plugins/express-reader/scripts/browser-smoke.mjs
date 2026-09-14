@@ -9,6 +9,9 @@ const html = `<!doctype html>
   <head><meta charset="utf-8"><title>eXpress Reader smoke</title></head>
   <body style="margin:0"><express-fixture></express-fixture>
     <script>
+      HTMLCanvasElement.prototype.toDataURL = () => {
+        throw new DOMException("Synthetic cross-origin image", "SecurityError");
+      };
       const root = document.querySelector("express-fixture").attachShadow({ mode: "closed" });
       root.innerHTML = \`
         <style>
@@ -38,7 +41,7 @@ const html = `<!doctype html>
               <span class="chat-message__title-text">Bob</span>
               <p class="chat-message__text">The build is ready.</p>
               <img class="attachment-image" alt="Deployment dashboard" width="160" height="96"
-                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22160%22 height=%2296%22%3E%3Crect width=%22160%22 height=%2296%22 fill=%22%230b6%22/%3E%3Ctext x=%2212%22 y=%2252%22 font-size=%2220%22 fill=%22white%22%3Eready%3C/text%3E%3C/svg%3E">
+                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22320%22 height=%22192%22%3E%3Crect width=%22320%22 height=%22192%22 fill=%22%230b6%22/%3E%3Ctext x=%2224%22 y=%22104%22 font-size=%2240%22 fill=%22white%22%3Eready%3C/text%3E%3C/svg%3E">
               <time class="chat-message__timestamp" title="10.09.2026, 08:05:00">08:05</time>
             </article>
           </main>
@@ -88,7 +91,7 @@ const html = `<!doctype html>
               <span class="chat-message__title-text">Bob</span>
               <p class="chat-message__text">The rollout is ready.</p>
               <img class="attachment-image" alt="Rollout chart" width="160" height="96"
-                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22160%22 height=%2296%22%3E%3Crect width=%22160%22 height=%2296%22 fill=%22%23067%22/%3E%3Ctext x=%2212%22 y=%2252%22 font-size=%2220%22 fill=%22white%22%3Erollout%3C/text%3E%3C/svg%3E">
+                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22320%22 height=%22192%22%3E%3Crect width=%22320%22 height=%22192%22 fill=%22%23067%22/%3E%3Ctext x=%2224%22 y=%22104%22 font-size=%2240%22 fill=%22white%22%3Erollout%3C/text%3E%3C/svg%3E">
               <time class="chat-message__timestamp" title="10.09.2026, 09:00:00">09:00</time>
             </article>
           \`;
@@ -123,7 +126,7 @@ try {
   process.env.EXPRESS_BROWSER_HEADLESS = "1";
 
   const { BrowserSession } = await import("../src/browser-session.mjs");
-  const { closeThread, listChats, listThreads, readChat, readImageAttachment, readThread } = await import("../src/ui-reader.mjs");
+  const { closeThread, inspectUi, listChats, listThreads, readChat, readImageAttachment, readThread } = await import("../src/ui-reader.mjs");
   const browser = new BrowserSession();
 
   try {
@@ -139,6 +142,9 @@ try {
       thread.messages.find((message) => message.text.includes("build is ready"))?.attachments?.length,
       1,
     );
+    const inspection = await inspectUi(page);
+    assert.ok(inspection.domScrollerCandidates.some((candidate) =>
+      candidate.className.includes("infinite-scroll--chat")));
 
     const image = await readImageAttachment(page, {
       chatTitle: "Alpha Team",
@@ -149,9 +155,9 @@ try {
     }, () => browser.assertPageAllowed(page));
     assert.equal(image.mimeType, "image/png");
     assert.equal(image.message.sender, "Bob");
-    assert.equal(image.image.width, 160);
-    assert.equal(image.image.height, 96);
-    assert.ok(["canvas", "rendered-screenshot"].includes(image.image.captureMethod));
+    assert.equal(image.image.width, 320);
+    assert.equal(image.image.height, 192);
+    assert.equal(image.image.captureMethod, "rendered-full-size");
     assert.ok(Buffer.from(image.data, "base64").byteLength > 100);
 
     const discussions = await listThreads(page, 10);

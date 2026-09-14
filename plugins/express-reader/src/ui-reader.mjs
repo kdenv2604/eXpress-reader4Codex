@@ -212,9 +212,13 @@ function messageImageCandidates(row) {
 async function domScrollerCandidates(page, limit = 20) {
   return domSnapshotElements(
     page,
-    ({ attributes, x, width, height }) =>
-      x > 700 && width > 300 && height > 250 &&
-      /scroll|history|message-list|chat-content/i.test(attributes.class || ""),
+    ({ attributes, width, height }) => {
+      const className = attributes.class || "";
+      const classes = className.split(/\s+/);
+      return width > 250 && height > 200 &&
+        (classes.includes("infinite-scroll--chat") ||
+          /history|message-list|chat-content/i.test(className));
+    },
     limit,
     200,
   );
@@ -803,6 +807,17 @@ const MAX_IMAGE_PIXELS = 12_000_000;
 async function captureImageFromBackendNode(page, backendDOMNodeId) {
   const session = await page.context().newCDPSession(page);
   try {
+    await session.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: backendDOMNodeId }).catch(async () => {
+      const { object } = await session.send("DOM.resolveNode", { backendNodeId: backendDOMNodeId });
+      await session.send("Runtime.callFunctionOn", {
+        objectId: object.objectId,
+        functionDeclaration: `function () {
+          this.scrollIntoView({ block: "center", inline: "nearest" });
+        }`,
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
     const { object } = await session.send("DOM.resolveNode", { backendNodeId: backendDOMNodeId });
     for (const maxDimension of [4_096, 2_048, 1_024]) {
       const { result, exceptionDetails } = await session.send("Runtime.callFunctionOn", {
@@ -850,18 +865,146 @@ async function captureImageFromBackendNode(page, backendDOMNodeId) {
       }
     }
 
-    const { model } = await session.send("DOM.getBoxModel", { backendNodeId: backendDOMNodeId });
-    const rect = quadToRect(model.content || model.border);
+    const { result: boundsResult } = await session.send("Runtime.callFunctionOn", {
+      objectId: object.objectId,
+      returnByValue: true,
+      functionDeclaration: `function () {
+        const rect = this.getBoundingClientRect();
+        return {
+          x: rect.x + window.scrollX,
+          y: rect.y + window.scrollY,
+          viewportX: rect.x,
+          viewportY: rect.y,
+          width: rect.width,
+          height: rect.height,
+          naturalWidth: this instanceof HTMLImageElement ? this.naturalWidth : null,
+          naturalHeight: this instanceof HTMLImageElement ? this.naturalHeight : null,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+        };
+      }`,
+    });
+    const bounds = boundsResult.value;
+    const rect = bounds && {
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.round(bounds.width),
+      height: Math.round(bounds.height),
+    };
     if (!rect || rect.width <= 0 || rect.height <= 0) {
       throw new Error("The selected eXpress image has no visible bounds.");
+    }
+
+    const naturalWidth = Number(bounds.naturalWidth) || 0;
+    const naturalHeight = Number(bounds.naturalHeight) || 0;
+    const renderedScale = naturalWidth && naturalHeight
+      ? Math.min(
+        1,
+        4_096 / naturalWidth,
+        4_096 / naturalHeight,
+        Math.sqrt(MAX_IMAGE_PIXELS / (naturalWidth * naturalHeight)),
+        bounds.viewportWidth / naturalWidth,
+        bounds.viewportHeight / naturalHeight,
+      )
+      : 0;
+    const renderedWidth = Math.max(1, Math.round(naturalWidth * renderedScale));
+    const renderedHeight = Math.max(1, Math.round(naturalHeight * renderedScale));
+    if (renderedScale > 0 &&
+        (renderedWidth > rect.width + 1 || renderedHeight > rect.height + 1)) {
+      const cloneId = `codex-express-image-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      try {
+        const { result: cloneResult, exceptionDetails } = await session.send("Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          returnByValue: true,
+          awaitPromise: true,
+          arguments: [
+            { value: cloneId },
+            { value: renderedWidth },
+            { value: renderedHeight },
+          ],
+          functionDeclaration: `async function (id, width, height) {
+            const clone = this.cloneNode(true);
+            clone.id = id;
+            clone.removeAttribute("class");
+            clone.removeAttribute("style");
+            clone.style.setProperty("position", "fixed", "important");
+            clone.style.setProperty("left", "0", "important");
+            clone.style.setProperty("top", "0", "important");
+            clone.style.setProperty("width", width + "px", "important");
+            clone.style.setProperty("height", height + "px", "important");
+            clone.style.setProperty("max-width", "none", "important");
+            clone.style.setProperty("max-height", "none", "important");
+            clone.style.setProperty("object-fit", "fill", "important");
+            clone.style.setProperty("display", "block", "important");
+            clone.style.setProperty("margin", "0", "important");
+            clone.style.setProperty("padding", "0", "important");
+            clone.style.setProperty("border", "0", "important");
+            clone.style.setProperty("border-radius", "0", "important");
+            clone.style.setProperty("opacity", "1", "important");
+            clone.style.setProperty("filter", "none", "important");
+            clone.style.setProperty("transform", "none", "important");
+            clone.style.setProperty("clip-path", "none", "important");
+            clone.style.setProperty("pointer-events", "none", "important");
+            clone.style.setProperty("z-index", "2147483647", "important");
+            document.documentElement.appendChild(clone);
+            if (typeof clone.decode === "function") {
+              await Promise.race([
+                clone.decode().catch(() => {}),
+                new Promise((resolve) => setTimeout(resolve, 1_500)),
+              ]);
+            }
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            return { x: window.scrollX, y: window.scrollY };
+          }`,
+        });
+        if (!exceptionDetails && cloneResult.value) {
+          const rendered = await session.send("Page.captureScreenshot", {
+            format: "png",
+            fromSurface: true,
+            captureBeyondViewport: false,
+            clip: {
+              x: cloneResult.value.x,
+              y: cloneResult.value.y,
+              width: renderedWidth,
+              height: renderedHeight,
+              scale: 1,
+            },
+          });
+          const renderedSizeBytes = Buffer.from(rendered.data, "base64").byteLength;
+          if (renderedSizeBytes <= MAX_IMAGE_BYTES) {
+            return {
+              data: rendered.data,
+              width: renderedWidth,
+              height: renderedHeight,
+              naturalWidth,
+              naturalHeight,
+              method: "rendered-full-size",
+              sizeBytes: renderedSizeBytes,
+              mimeType: "image/png",
+            };
+          }
+        }
+      } catch {
+        // Fall back to the visible inline rendering below.
+      } finally {
+        await session.send("Runtime.evaluate", {
+          expression: `document.getElementById(${JSON.stringify(cloneId)})?.remove()`,
+        }).catch(() => {});
+      }
+    }
+
+    if (bounds.viewportX < 0 || bounds.viewportY < 0 ||
+        bounds.viewportX + bounds.width > bounds.viewportWidth ||
+        bounds.viewportY + bounds.height > bounds.viewportHeight) {
+      throw new Error("The selected eXpress image could not be scrolled fully into view.");
     }
     const screenshot = await session.send("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
-      captureBeyondViewport: true,
+      captureBeyondViewport: false,
       clip: {
-        x: Math.max(0, rect.x),
-        y: Math.max(0, rect.y),
+        x: rect.x,
+        y: rect.y,
         width: rect.width,
         height: rect.height,
         scale: 1,
@@ -875,8 +1018,8 @@ async function captureImageFromBackendNode(page, backendDOMNodeId) {
       data: screenshot.data,
       width: rect.width,
       height: rect.height,
-      naturalWidth: null,
-      naturalHeight: null,
+      naturalWidth: bounds.naturalWidth || null,
+      naturalHeight: bounds.naturalHeight || null,
       method: "rendered-screenshot",
       sizeBytes,
       mimeType: "image/png",
