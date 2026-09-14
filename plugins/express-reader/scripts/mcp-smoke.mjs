@@ -16,12 +16,19 @@ const html = `<!doctype html>
       root.innerHTML = \`
         <style>
           .app { display:grid; grid-template-columns:320px 1fr; height:100vh }
+          .tabs { display:flex; gap:8px; padding:8px }
+          .tab--selected { font-weight:bold }
           .chat-list-entry { display:block; width:300px; height:64px; text-align:left }
           .messages { height:100vh; overflow-y:auto; padding:20px }
           .chat-message-row { min-height:80px }
+          .attachment-image { display:block; width:160px; height:96px }
         </style>
         <div class="app">
           <aside>
+            <nav class="tabs">
+              <button class="tab tab--selected">Все чаты</button>
+              <button class="tab">Обсуждения</button>
+            </nav>
             <button class="row chat-list-entry">
               <span>Alpha Team</span><span class="chat-list-entry__time chat-list-entry__time--unread">08:05</span>
               <span>Two unread messages</span><span class="row chat-list-entry-counter">2</span>
@@ -37,6 +44,8 @@ const html = `<!doctype html>
             <article class="chat-message-row chat-message-row--opponent">
               <span class="chat-message__title-text">Bob</span>
               <p class="chat-message__text">The build is ready.</p>
+              <img class="attachment-image" alt="Deployment dashboard" width="160" height="96"
+                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22160%22 height=%2296%22%3E%3Crect width=%22160%22 height=%2296%22 fill=%22%230b6%22/%3E%3Ctext x=%2212%22 y=%2252%22 font-size=%2220%22 fill=%22white%22%3Eready%3C/text%3E%3C/svg%3E">
               <time class="chat-message__timestamp" title="10.09.2026, 08:05:00">08:05</time>
             </article>
           </main>
@@ -157,7 +166,23 @@ try {
   }));
   assert.ok(thread.messages.some((message) => message.text.includes("review the release")));
 
-  payload(await request(5, "tools/call", {
+  const imageResponse = await request(5, "tools/call", {
+    name: "express_read_image",
+    arguments: {
+      chatTitle: "Alpha Team",
+      messageQuery: "The build is ready",
+      sender: "Bob",
+      imageIndex: 0,
+      historyPages: 1,
+    },
+  });
+  assert.equal(imageResponse.result?.isError, undefined);
+  assert.equal(imageResponse.result?.content?.[1]?.type, "image");
+  assert.equal(imageResponse.result?.content?.[1]?.mimeType, "image/png");
+  assert.ok(Buffer.from(imageResponse.result.content[1].data, "base64").byteLength > 100);
+  assert.equal(imageResponse.result?.structuredContent?.message?.sender, "Bob");
+
+  payload(await request(6, "tools/call", {
     name: "express_close_browser",
     arguments: {},
   }));

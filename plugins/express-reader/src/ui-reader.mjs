@@ -59,6 +59,9 @@ async function domSnapshotElements(page, predicate, limit = 100, textLimit = 600
 
     const { nodes, layout } = document;
     const children = Array.from({ length: nodes.nodeType.length }, () => []);
+    const layoutBounds = new Map(
+      layout.nodeIndex.map((nodeIndex, index) => [nodeIndex, layout.bounds[index]]),
+    );
     nodes.parentIndex.forEach((parent, index) => {
       if (parent >= 0) children[parent].push(index);
     });
@@ -77,14 +80,35 @@ async function domSnapshotElements(page, predicate, limit = 100, textLimit = 600
     const metadataOf = (root) => {
       const labels = [];
       const classNames = [];
+      const images = [];
       const parts = {};
       const pending = [root];
       while (pending.length) {
         const index = pending.shift();
         if (nodes.nodeType[index] === 1) {
           const attributes = decodeAttributes(nodes.attributes[index], snapshot.strings);
+          const nodeName = (snapshot.strings[nodes.nodeName[index]] || "").toLocaleLowerCase();
           for (const label of [attributes.alt, attributes["aria-label"], attributes.title]) {
             if (label) labels.push(normalizeText(label));
+          }
+          if (nodeName === "img") {
+            const bounds = layoutBounds.get(index);
+            if (bounds) {
+              const [x, y, width, height] = bounds;
+              images.push({
+                backendDOMNodeId: nodes.backendNodeId[index],
+                alt: normalizeText(attributes.alt) || null,
+                ariaLabel: normalizeText(attributes["aria-label"]) || null,
+                title: normalizeText(attributes.title) || null,
+                className: attributes.class || null,
+                rect: {
+                  x: Math.round(x),
+                  y: Math.round(y),
+                  width: Math.round(width),
+                  height: Math.round(height),
+                },
+              });
+            }
           }
           if (attributes.class) {
             classNames.push(attributes.class);
@@ -102,6 +126,7 @@ async function domSnapshotElements(page, predicate, limit = 100, textLimit = 600
       return {
         labels: [...new Set(labels.filter(Boolean))],
         classNames: [...new Set(classNames.filter(Boolean))],
+        images,
         parts,
       };
     };
@@ -114,8 +139,8 @@ async function domSnapshotElements(page, predicate, limit = 100, textLimit = 600
       const attributes = decodeAttributes(nodes.attributes[nodeIndex], snapshot.strings);
       if (!predicate({ attributes, x, y, width, height })) continue;
       const text = textOf(nodeIndex);
-      if (!text) continue;
       const metadata = metadataOf(nodeIndex);
+      if (!text && !metadata.images.length) continue;
       candidates.push({
         backendDOMNodeId: nodes.backendNodeId[nodeIndex],
         nodeName: snapshot.strings[nodes.nodeName[nodeIndex]].toLocaleLowerCase(),
@@ -176,6 +201,14 @@ async function domMessageCandidates(page, limit = 100) {
   );
 }
 
+function messageImageCandidates(row) {
+  return (row.images || []).filter(({ rect }) =>
+    rect.width > 0 &&
+    rect.height > 0 &&
+    Math.max(rect.width, rect.height) >= 96 &&
+    rect.width * rect.height >= 4_096);
+}
+
 async function domScrollerCandidates(page, limit = 20) {
   return domSnapshotElements(
     page,
@@ -200,7 +233,8 @@ function parseMessageRow(row) {
   const text = normalizeText(textParts.join("\n")) ||
     normalizeText(contentParts[0]) ||
     normalizeText(row.text);
-  if (!text) return null;
+  const images = messageImageCandidates(row);
+  if (!text && !images.length) return null;
 
   return {
     sender,
@@ -212,6 +246,14 @@ function parseMessageRow(row) {
         ? "outgoing"
         : null,
     text,
+    attachments: images.map((image, index) => ({
+      type: "image",
+      index,
+      alt: image.alt,
+      title: image.title,
+      displayedWidth: image.rect.width,
+      displayedHeight: image.rect.height,
+    })),
   };
 }
 
@@ -755,6 +797,214 @@ async function collectDomMessageHistory(page, historyPages, messageLimit) {
     messageSortValue(left) - messageSortValue(right));
 }
 
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_PIXELS = 12_000_000;
+
+async function captureImageFromBackendNode(page, backendDOMNodeId) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { object } = await session.send("DOM.resolveNode", { backendNodeId: backendDOMNodeId });
+    for (const maxDimension of [4_096, 2_048, 1_024]) {
+      const { result, exceptionDetails } = await session.send("Runtime.callFunctionOn", {
+        objectId: object.objectId,
+        returnByValue: true,
+        arguments: [{ value: maxDimension }, { value: MAX_IMAGE_PIXELS }],
+        functionDeclaration: `function (maxDimension, maxPixels) {
+          if (!(this instanceof HTMLImageElement) || !this.complete || !this.naturalWidth || !this.naturalHeight) {
+            return { error: "image-not-ready" };
+          }
+          const naturalWidth = this.naturalWidth;
+          const naturalHeight = this.naturalHeight;
+          const scale = Math.min(
+            1,
+            maxDimension / naturalWidth,
+            maxDimension / naturalHeight,
+            Math.sqrt(maxPixels / (naturalWidth * naturalHeight)),
+          );
+          const width = Math.max(1, Math.round(naturalWidth * scale));
+          const height = Math.max(1, Math.round(naturalHeight * scale));
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d");
+            context.drawImage(this, 0, 0, width, height);
+            return {
+              data: canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, ""),
+              width,
+              height,
+              naturalWidth,
+              naturalHeight,
+              method: "canvas",
+            };
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : String(error) };
+          }
+        }`,
+      });
+      const capture = exceptionDetails ? null : result.value;
+      if (!capture?.data) continue;
+      const sizeBytes = Buffer.from(capture.data, "base64").byteLength;
+      if (sizeBytes <= MAX_IMAGE_BYTES) {
+        return { ...capture, sizeBytes, mimeType: "image/png" };
+      }
+    }
+
+    const { model } = await session.send("DOM.getBoxModel", { backendNodeId: backendDOMNodeId });
+    const rect = quadToRect(model.content || model.border);
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      throw new Error("The selected eXpress image has no visible bounds.");
+    }
+    const screenshot = await session.send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: true,
+      clip: {
+        x: Math.max(0, rect.x),
+        y: Math.max(0, rect.y),
+        width: rect.width,
+        height: rect.height,
+        scale: 1,
+      },
+    });
+    const sizeBytes = Buffer.from(screenshot.data, "base64").byteLength;
+    if (sizeBytes > MAX_IMAGE_BYTES) {
+      throw new Error(`The selected eXpress image is too large (${sizeBytes} bytes).`);
+    }
+    return {
+      data: screenshot.data,
+      width: rect.width,
+      height: rect.height,
+      naturalWidth: null,
+      naturalHeight: null,
+      method: "rendered-screenshot",
+      sizeBytes,
+      mimeType: "image/png",
+    };
+  } finally {
+    await session.detach();
+  }
+}
+
+function messageMatchesImageQuery(message, messageQuery, sender) {
+  const normalizedText = normalizeText(message.text).toLocaleLowerCase();
+  const normalizedQuery = normalizeText(messageQuery).toLocaleLowerCase();
+  if (!normalizedText.includes(normalizedQuery)) return false;
+  if (!sender) return true;
+  return normalizeText(message.sender).toLocaleLowerCase() === normalizeText(sender).toLocaleLowerCase();
+}
+
+async function findAndCaptureMessageImage(
+  page,
+  { messageQuery, sender = null, imageIndex = 0, historyPages = 4 },
+  assertAllowed = null,
+) {
+  let matchingMessages = 0;
+  let largestImageCount = 0;
+
+  for (let pageIndex = 0; pageIndex < historyPages; pageIndex += 1) {
+    const rows = await domMessageCandidates(page, 500);
+    const matches = rows
+      .map((row) => ({ row, message: parseMessageRow(row) }))
+      .filter(({ message }) => message && messageMatchesImageQuery(message, messageQuery, sender))
+      .reverse();
+
+    for (const { row, message } of matches) {
+      matchingMessages += 1;
+      const images = messageImageCandidates(row);
+      largestImageCount = Math.max(largestImageCount, images.length);
+      const selected = images[imageIndex];
+      if (!selected) continue;
+
+      await assertAllowed?.();
+      const capture = await captureImageFromBackendNode(page, selected.backendDOMNodeId);
+      await assertAllowed?.();
+      return {
+        data: capture.data,
+        mimeType: capture.mimeType,
+        message: {
+          sender: message.sender,
+          time: message.time,
+          timestamp: message.timestamp,
+          direction: message.direction,
+          text: clipText(message.text, 500),
+        },
+        image: {
+          index: imageIndex,
+          countInMessage: images.length,
+          width: capture.width,
+          height: capture.height,
+          naturalWidth: capture.naturalWidth,
+          naturalHeight: capture.naturalHeight,
+          sizeBytes: capture.sizeBytes,
+          captureMethod: capture.method,
+        },
+      };
+    }
+
+    if (pageIndex + 1 >= historyPages) break;
+    const movement = await scrollMessageHistory(page);
+    if (!movement || movement.before === movement.after || movement.atTop) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  if (matchingMessages) {
+    throw new Error(
+      `Found ${matchingMessages} matching eXpress message(s), but image index ${imageIndex} was not available. ` +
+      `The largest matching message contained ${largestImageCount} readable inline image(s).`,
+    );
+  }
+  throw new Error(`No eXpress message matching "${messageQuery}" was found in the loaded history.`);
+}
+
+export async function readImageAttachment(
+  page,
+  {
+    chatTitle,
+    threadQuery = null,
+    messageQuery,
+    sender = null,
+    imageIndex = 0,
+    historyPages = 4,
+  },
+  assertAllowed = null,
+) {
+  await closeThread(page, null);
+  const previousTab = await selectedChatListTab(page);
+
+  try {
+    if (threadQuery) {
+      await readThread(page, {
+        query: threadQuery,
+        chatTitle,
+        historyPages: 1,
+        messageLimit: 1,
+        closeAfter: false,
+      }, assertAllowed);
+    } else {
+      await selectChatListTab(page, "Все чаты");
+      const surface = await resolveAppSurface(page);
+      await clickChatByTitle(page, surface, chatTitle);
+      await assertAllowed?.();
+      await new Promise((resolve) => setTimeout(resolve, 750));
+    }
+
+    const captured = await findAndCaptureMessageImage(
+      page,
+      { messageQuery, sender, imageIndex, historyPages },
+      assertAllowed,
+    );
+    return {
+      chat: chatTitle,
+      thread: threadQuery,
+      ...captured,
+      note: "Opening a chat or thread can mark messages as read in eXpress. Only rendered image pixels are returned.",
+    };
+  } finally {
+    if (threadQuery) await closeThread(page, previousTab || "Все чаты");
+  }
+}
+
 export async function closeThread(page, restoreTab = "Все чаты") {
   const header = (await domThreadHeaderCandidates(page, 1))[0];
   if (!header) {
@@ -845,6 +1095,8 @@ export async function readChat(
   messageLimit = 200,
   assertAllowed = null,
 ) {
+  await closeThread(page, null);
+  await selectChatListTab(page, "Все чаты");
   const surface = await resolveAppSurface(page);
   await clickChatByTitle(page, surface, title);
   await assertAllowed?.();

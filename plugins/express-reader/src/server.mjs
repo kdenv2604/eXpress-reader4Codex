@@ -12,6 +12,17 @@ function result(value) {
   };
 }
 
+function imageResult(value) {
+  const { data, mimeType, ...metadata } = value;
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(metadata, null, 2) },
+      { type: "image", data, mimeType },
+    ],
+    structuredContent: metadata,
+  };
+}
+
 function failure(error) {
   return {
     isError: true,
@@ -23,6 +34,16 @@ function safely(handler) {
   return async (input) => {
     try {
       return result(await handler(input));
+    } catch (error) {
+      return failure(error);
+    }
+  };
+}
+
+function safelyImage(handler) {
+  return async (input) => {
+    try {
+      return imageResult(await handler(input));
     } catch (error) {
       return failure(error);
     }
@@ -119,6 +140,23 @@ export function createServer() {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     safely((input) => reader.readThread(input)),
+  );
+
+  server.registerTool(
+    "express_read_image",
+    {
+      description: "Open a specific eXpress chat or discussion, find a message by text and optional sender, and return one rendered inline image. This is read-only but may mark messages as read. It does not return attachment URLs, cookies, or tokens.",
+      inputSchema: z.object({
+        chatTitle: z.string().min(1),
+        threadQuery: z.string().min(1).optional(),
+        messageQuery: z.string().min(1),
+        sender: z.string().min(1).optional(),
+        imageIndex: z.number().int().min(0).max(20).default(0),
+        historyPages: z.number().int().min(1).max(20).default(4),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    safelyImage((input) => reader.readImage(input)),
   );
 
   server.registerTool(

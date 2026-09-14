@@ -48,10 +48,13 @@ The Web client defaults to `https://corp.express`. Override it only when your or
 3. Check the prefilled server, continue, and complete authentication in the dedicated browser window.
 4. Call `express_list_chats`.
 5. Call `express_read_chat` for conversations that should be reviewed.
+6. When a particular message contains a screenshot or photo that must be inspected, call `express_read_image` with the chat, optional discussion topic, message text, and optional sender.
 
 The UI adapter intentionally avoids private eXpress APIs. It reads eXpress Shadow DOM through a browser DOM snapshot and has been calibrated against Web eXpress 3.72.37. If a later build changes its UI semantics, `express_inspect_ui` returns a bounded diagnostic snapshot for one-time calibration.
 
 `express_read_chat` returns the messages currently loaded by eXpress and makes best-effort upward scrolls according to `historyPages`. The response includes `loadedMessageCount`, so callers can see the actual result depth.
+
+`express_read_image` returns a bounded PNG rendering of one inline image. It never exposes the image URL, cookies, headers, or access tokens and does not provide arbitrary file downloads.
 
 ## Install in Codex
 
@@ -79,11 +82,15 @@ Start a new Codex task after installation so the new skill and MCP tools are loa
 | `express_configure` | Save Web client, corporate server, and browser preference locally | No |
 | `express_open_login` | Open the dedicated profile and prefill the corporate server | No |
 | `express_list_chats` | Read visible chat rows and unread indicators | No |
+| `express_list_threads` | List visible eXpress discussions | No |
 | `express_read_chat` | Open and read one chat | May mark it as read |
+| `express_read_thread` | Open and read one discussion | May mark it as read |
+| `express_read_image` | Return one inline image from a specifically identified message | May mark it as read |
+| `express_close_thread` | Close the current discussion and restore the chat list | No |
 | `express_search_loaded` | Search chats read in the current session | No |
 | `express_inspect_ui` | Inspect bounded UI text for adapter calibration | No |
 | `express_close_browser` | Close the dedicated local browser | No |
 
 ## Project status
 
-The read-only MCP server, isolated persistent browser profile, chat list, unread counters, and structured message extraction are implemented and verified against an authenticated Web eXpress 3.72.37 session. Future eXpress UI releases may require adapter recalibration.
+The read-only MCP server, isolated persistent browser profile, chats, discussions, unread counters, structured message extraction, and bounded inline-image rendering are implemented. Future eXpress UI releases may require adapter recalibration.

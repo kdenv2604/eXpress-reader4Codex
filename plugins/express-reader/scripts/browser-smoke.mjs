@@ -18,6 +18,7 @@ const html = `<!doctype html>
           .chat-list-entry { display:block; width:300px; height:64px; text-align:left }
           .messages { height:100vh; overflow-y:auto; padding:20px }
           .chat-message-row { min-height:80px }
+          .attachment-image { display:block; width:160px; height:96px }
         </style>
         <div class="app">
           <aside>
@@ -36,6 +37,8 @@ const html = `<!doctype html>
             <article class="chat-message-row chat-message-row--opponent">
               <span class="chat-message__title-text">Bob</span>
               <p class="chat-message__text">The build is ready.</p>
+              <img class="attachment-image" alt="Deployment dashboard" width="160" height="96"
+                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22160%22 height=%2296%22%3E%3Crect width=%22160%22 height=%2296%22 fill=%22%230b6%22/%3E%3Ctext x=%2212%22 y=%2252%22 font-size=%2220%22 fill=%22white%22%3Eready%3C/text%3E%3C/svg%3E">
               <time class="chat-message__timestamp" title="10.09.2026, 08:05:00">08:05</time>
             </article>
           </main>
@@ -84,6 +87,8 @@ const html = `<!doctype html>
             <article class="chat-message-row chat-message-row--opponent">
               <span class="chat-message__title-text">Bob</span>
               <p class="chat-message__text">The rollout is ready.</p>
+              <img class="attachment-image" alt="Rollout chart" width="160" height="96"
+                src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22160%22 height=%2296%22%3E%3Crect width=%22160%22 height=%2296%22 fill=%22%23067%22/%3E%3Ctext x=%2212%22 y=%2252%22 font-size=%2220%22 fill=%22white%22%3Erollout%3C/text%3E%3C/svg%3E">
               <time class="chat-message__timestamp" title="10.09.2026, 09:00:00">09:00</time>
             </article>
           \`;
@@ -118,7 +123,7 @@ try {
   process.env.EXPRESS_BROWSER_HEADLESS = "1";
 
   const { BrowserSession } = await import("../src/browser-session.mjs");
-  const { closeThread, listChats, listThreads, readChat, readThread } = await import("../src/ui-reader.mjs");
+  const { closeThread, listChats, listThreads, readChat, readImageAttachment, readThread } = await import("../src/ui-reader.mjs");
   const browser = new BrowserSession();
 
   try {
@@ -130,6 +135,24 @@ try {
     const thread = await readChat(page, "Alpha Team", 1, 10, () => browser.assertPageAllowed(page));
     assert.equal(thread.detection, "express-dom-snapshot");
     assert.ok(thread.messages.some((message) => message.text.includes("review the release")));
+    assert.equal(
+      thread.messages.find((message) => message.text.includes("build is ready"))?.attachments?.length,
+      1,
+    );
+
+    const image = await readImageAttachment(page, {
+      chatTitle: "Alpha Team",
+      messageQuery: "The build is ready",
+      sender: "Bob",
+      imageIndex: 0,
+      historyPages: 1,
+    }, () => browser.assertPageAllowed(page));
+    assert.equal(image.mimeType, "image/png");
+    assert.equal(image.message.sender, "Bob");
+    assert.equal(image.image.width, 160);
+    assert.equal(image.image.height, 96);
+    assert.ok(["canvas", "rendered-screenshot"].includes(image.image.captureMethod));
+    assert.ok(Buffer.from(image.data, "base64").byteLength > 100);
 
     const discussions = await listThreads(page, 10);
     assert.equal(discussions.detection, "express-dom-snapshot");
@@ -145,6 +168,18 @@ try {
     assert.equal(discussion.parent.text, "Release discussion");
     assert.ok(discussion.messages.some((message) => message.text === "The rollout is ready."));
     assert.equal(discussion.closedAfterRead, true);
+
+    const threadImage = await readImageAttachment(page, {
+      chatTitle: "Release Room",
+      threadQuery: "Release discussion",
+      messageQuery: "The rollout is ready",
+      sender: "Bob",
+      imageIndex: 0,
+      historyPages: 1,
+    }, () => browser.assertPageAllowed(page));
+    assert.equal(threadImage.mimeType, "image/png");
+    assert.equal(threadImage.thread, "Release discussion");
+    assert.ok(Buffer.from(threadImage.data, "base64").byteLength > 100);
 
     const cleanup = await closeThread(page);
     assert.equal(cleanup.closed, false);

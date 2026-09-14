@@ -6,6 +6,7 @@ export const TOOL_CONTRACT = Object.freeze([
   { name: "express_list_threads", messengerMutation: false },
   { name: "express_read_chat", messengerMutation: false, canMarkRead: true },
   { name: "express_read_thread", messengerMutation: false, canMarkRead: true },
+  { name: "express_read_image", messengerMutation: false, canMarkRead: true },
   { name: "express_close_thread", messengerMutation: false },
   { name: "express_search_loaded", messengerMutation: false },
   { name: "express_inspect_ui", messengerMutation: false },

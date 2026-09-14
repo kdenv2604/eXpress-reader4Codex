@@ -7,6 +7,7 @@ import {
   listThreads,
   prepareCorporateLogin,
   readChat,
+  readImageAttachment,
   readThread,
 } from "./ui-reader.mjs";
 
@@ -83,6 +84,11 @@ export class ExpressReader {
       );
     }
     return result;
+  }
+
+  async readImage(input) {
+    const page = await this.#browser.pageForReading();
+    return readImageAttachment(page, input, () => this.#browser.assertPageAllowed(page));
   }
 
   async closeThread() {

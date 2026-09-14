@@ -14,7 +14,8 @@ Use the `express_*` MCP tools for the user's corporate eXpress messenger.
 - This plugin intentionally exposes no messenger write tools.
 - `express_read_chat` and `express_read_thread` may mark messages as read because they open the conversation. Mention this before the first read in a task when it matters.
 - Credentials stay in the dedicated browser profile. Never request, copy, display, or store a password, OTP, cookie, or access token.
-- Do not download attachments unless the user explicitly asks for a specific file.
+- Use `express_read_image` only when the user explicitly asks to inspect a specific inline image. Identify it with the chat, optional thread, message text, and optional sender. The tool returns rendered pixels, never attachment URLs, cookies, or tokens.
+- Do not use `express_read_image` for arbitrary file downloads or non-image attachments.
 
 ## Workflow
 
@@ -24,8 +25,9 @@ Use the `express_*` MCP tools for the user's corporate eXpress messenger.
 4. Use `express_list_chats` to identify unread or relevant conversations.
 5. Use `express_read_chat` only for chats needed by the request.
 6. For content in discussions, use `express_list_threads` to find the source chat and topic, then `express_read_thread`. It closes the thread and restores the previous chat-list tab by default.
-7. Use `express_close_thread` only to clean up after an interrupted read or after deliberately calling `express_read_thread` with `closeAfter: false`.
-8. Summarize by chat or thread with open questions, commitments, deadlines, and likely reply-needed items separated from FYI items.
-9. Use `express_search_loaded` only for chats and threads already read in this MCP session.
+7. For a requested screenshot or photo, call `express_read_image` with a distinctive fragment of the containing message. Use `imageIndex` when that message contains more than one image.
+8. Use `express_close_thread` only to clean up after an interrupted read or after deliberately calling `express_read_thread` with `closeAfter: false`.
+9. Summarize by chat or thread with open questions, commitments, deadlines, and likely reply-needed items separated from FYI items.
+10. Use `express_search_loaded` only for chats and threads already read in this MCP session.
 
 If structured detection fails, call `express_inspect_ui` once and report that the adapter needs calibration. Do not guess message authors or timestamps from ambiguous text.
