@@ -26,8 +26,8 @@ const html = `<!doctype html>
         <div class="app">
           <aside>
             <nav class="tabs">
-              <button id="all-tab" class="tab tab--selected">\u0412\u0441\u0435 \u0447\u0430\u0442\u044b</button>
-              <button id="threads-tab" class="tab">\u041e\u0431\u0441\u0443\u0436\u0434\u0435\u043d\u0438\u044f</button>
+              <button id="all-tab" class="tab tab--selected">\u0412\u0441\u0435 \u0447\u0430\u0442\u044b<span>12</span></button>
+              <button id="threads-tab" class="tab">\u041e\u0431\u0441\u0443\u0436\u0434\u0435\u043d\u0438\u044f<span id="thread-counter">1</span></button>
             </nav>
             <div id="chat-list"></div>
           </aside>
@@ -52,10 +52,12 @@ const html = `<!doctype html>
       const chatList = root.querySelector("#chat-list");
       const content = root.querySelector("#content");
       const initialMessages = content.innerHTML;
+      window.fixtureStats = { threadOpenings: 0, threadClosings: 0 };
 
       const selectTab = (selected) => {
         allTab.classList.toggle("tab--selected", selected === allTab);
         threadsTab.classList.toggle("tab--selected", selected === threadsTab);
+        window.fixtureStats.activeTab = selected.id;
       };
       const renderChats = () => {
         selectTab(allTab);
@@ -77,10 +79,14 @@ const html = `<!doctype html>
           </button>
         \`;
         root.querySelector("#release-thread").addEventListener("click", () => {
+          window.fixtureStats.threadOpenings++;
+          root.querySelector("#thread-counter").textContent = "99+";
           content.innerHTML = \`
             <header class="chat-header" data-chat-type="thread">
               <button id="close-thread" type="button" aria-label="Back">Back</button>
-              <span>Release discussion</span>
+              <span>Release Room</span>
+              <span>\u041e\u0431\u0441\u0443\u0436\u0434\u0435\u043d\u0438\u0435 \u0432</span>
+              <span>4 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430</span>
             </header>
             <article class="chat-message-row chat-message-row--opponent">
               <span class="chat-message__title-text">Alice</span>
@@ -96,6 +102,7 @@ const html = `<!doctype html>
             </article>
           \`;
           root.querySelector("#close-thread").addEventListener("click", () => {
+            window.fixtureStats.threadClosings++;
             content.innerHTML = initialMessages;
             renderThreads();
           });
@@ -174,6 +181,42 @@ try {
     assert.equal(discussion.parent.text, "Release discussion");
     assert.ok(discussion.messages.some((message) => message.text === "The rollout is ready."));
     assert.equal(discussion.closedAfterRead, true);
+
+    // A second read of the same open thread must not close and reopen it.
+    await readThread(page, {
+      query: "Release discussion", chatTitle: "Release Room",
+      historyPages: 1, messageLimit: 10, closeAfter: false,
+    }, () => browser.assertPageAllowed(page));
+    const openingsBeforeReuse = await page.evaluate(() => window.fixtureStats.threadOpenings);
+    const reopened = await readThread(page, {
+      query: "Release discussion", chatTitle: "Release Room",
+      historyPages: 1, messageLimit: 10, closeAfter: true,
+    }, () => browser.assertPageAllowed(page));
+    assert.equal(reopened.reusedOpenThread, true);
+    assert.equal(await page.evaluate(() => window.fixtureStats.threadOpenings), openingsBeforeReuse);
+    assert.equal(reopened.parent.text, "Release discussion");
+    assert.ok(reopened.messages.some((message) => message.text === "The rollout is ready."));
+
+    // A matching topic in a different chat must not reuse the open discussion.
+    await readThread(page, {
+      query: "Release discussion", chatTitle: "Release Room",
+      historyPages: 1, messageLimit: 10, closeAfter: false,
+    }, () => browser.assertPageAllowed(page));
+    await assert.rejects(readThread(page, {
+      query: "Release discussion", chatTitle: "Other Room",
+      historyPages: 1, messageLimit: 10,
+    }, () => browser.assertPageAllowed(page)), /thread matching.*was not found/);
+    assert.equal(await page.evaluate(() => window.fixtureStats.activeTab), "threads-tab");
+
+    // Failed reads must restore the original tab too.
+    await closeThread(page);
+    const afterFailedRead = await listChats(page, 10);
+    assert.ok(afterFailedRead.chats.some((chat) => chat.title === "Release Room"));
+    await assert.rejects(readThread(page, {
+      query: "Missing discussion", chatTitle: "Release Room",
+      historyPages: 1, messageLimit: 10,
+    }, () => browser.assertPageAllowed(page)), /thread matching.*was not found/);
+    assert.equal(await page.evaluate(() => window.fixtureStats.activeTab), "all-tab");
 
     const threadImage = await readImageAttachment(page, {
       chatTitle: "Release Room",

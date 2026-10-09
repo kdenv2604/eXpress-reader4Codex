@@ -24,6 +24,13 @@ function normalizeText(value) {
     .trim();
 }
 
+// Unread badges are part of the DOM text, but not of the tab's name.
+function chatListTabTitle(value) {
+  return normalizeText(value)
+    .replace(/\s+/g, " ")
+    .replace(/^(Все чаты|Обсуждения|Каталог)\s+\d+\+?$/iu, "$1");
+}
+
 function quadToRect(quad) {
   if (!quad?.length) return null;
   const xs = quad.filter((_, index) => index % 2 === 0);
@@ -641,7 +648,7 @@ async function clickBackendNodeDescendant(page, backendDOMNodeId, selector) {
 async function selectedChatListTab(page) {
   const selected = (await domTabCandidates(page)).find((candidate) =>
     candidate.className?.split(/\s+/).includes("tab--selected"));
-  return selected?.text || null;
+  return selected ? chatListTabTitle(selected.text) : null;
 }
 
 async function waitForChatListTabs(page, timeoutMs = 20_000) {
@@ -656,10 +663,10 @@ async function waitForChatListTabs(page, timeoutMs = 20_000) {
 }
 
 async function selectChatListTab(page, title, timeoutMs = 10_000) {
-  const normalizedTitle = normalizeText(title).toLocaleLowerCase();
+  const normalizedTitle = chatListTabTitle(title).toLocaleLowerCase();
   const tabs = await waitForChatListTabs(page);
   const tab = tabs.find((candidate) =>
-    normalizeText(candidate.text).toLocaleLowerCase() === normalizedTitle);
+    chatListTabTitle(candidate.text).toLocaleLowerCase() === normalizedTitle);
   if (!tab) throw new Error(`The eXpress tab "${title}" was not found.`);
   if (tab.className?.split(/\s+/).includes("tab--selected")) return;
 
@@ -668,7 +675,7 @@ async function selectChatListTab(page, title, timeoutMs = 10_000) {
   do {
     await new Promise((resolve) => setTimeout(resolve, 250));
     const selected = await selectedChatListTab(page);
-    if (normalizeText(selected).toLocaleLowerCase() === normalizedTitle) return;
+    if (chatListTabTitle(selected).toLocaleLowerCase() === normalizedTitle) return;
   } while (Date.now() < deadline);
   throw new Error(`The eXpress tab "${title}" did not become active.`);
 }
@@ -1171,6 +1178,35 @@ export async function closeThread(page, restoreTab = "Все чаты") {
   return { closed: true, restoredTab: restoreTab || null };
 }
 
+async function matchingOpenThread(page, query, chatTitle) {
+  const header = (await domThreadHeaderCandidates(page, 1))[0];
+  if (!header) return null;
+  const lines = header.text.split("\n").map(normalizeText).filter(Boolean);
+  const prefix = "Обсуждение в ";
+  const titleLine = lines.find((line) => line.startsWith(prefix));
+  const prefixIndex = lines.indexOf(prefix.trim());
+  // The current client stores the chat name before the separate prefix node.
+  const sourceChat = titleLine?.slice(prefix.length) ||
+    (prefixIndex > 0 ? lines[prefixIndex - 1] : null);
+  if (!sourceChat || (chatTitle && sourceChat.toLocaleLowerCase() !== normalizeText(chatTitle).toLocaleLowerCase())) {
+    return null;
+  }
+
+  // Reuse only when both the source chat and the parent message are known.
+  // If the topic is not visible, the normal open-and-verify path stays in use.
+  const parent = (await domMessageCandidates(page, 300))
+    .map(parseMessageRow)
+    .find((message) => message && normalizeText(message.text).toLocaleLowerCase() === normalizeText(query).toLocaleLowerCase());
+  if (!parent) return null;
+  return {
+    chatTitle: sourceChat,
+    topic: parent.text,
+    updatedAt: null,
+    preview: null,
+    visibleText: header.text,
+  };
+}
+
 export async function readThread(
   page,
   {
@@ -1182,46 +1218,52 @@ export async function readThread(
   },
   assertAllowed = null,
 ) {
-  await closeThread(page, null);
   const previousTab = await selectedChatListTab(page);
-  await selectChatListTab(page, "Обсуждения");
 
   try {
-    const rows = await waitForChatRows(page, 300);
-    const candidates = rows.map((row) => ({ row, thread: parseThreadRow(row) })).filter(({ thread }) => thread);
-    const normalizedQuery = normalizeText(query).toLocaleLowerCase();
-    const normalizedChatTitle = normalizeText(chatTitle).toLocaleLowerCase();
-    const matches = candidates.filter(({ thread }) => {
-      if (normalizedChatTitle && thread.chatTitle.toLocaleLowerCase() !== normalizedChatTitle) return false;
-      return thread.topic.toLocaleLowerCase() === normalizedQuery ||
-        thread.visibleText.toLocaleLowerCase().includes(normalizedQuery);
-    });
-    const selected = matches.find(({ thread }) => thread.topic.toLocaleLowerCase() === normalizedQuery) || matches[0];
-    if (!selected) {
-      throw new Error(`A visible eXpress thread matching "${query}" was not found. Use express_list_threads first.`);
-    }
+    let thread = await matchingOpenThread(page, query, chatTitle);
+    const reusedOpenThread = Boolean(thread);
+    if (!thread) {
+      await closeThread(page, null);
+      await selectChatListTab(page, "Обсуждения");
+      const rows = await waitForChatRows(page, 300);
+      const candidates = rows.map((row) => ({ row, thread: parseThreadRow(row) })).filter(({ thread }) => thread);
+      const normalizedQuery = normalizeText(query).toLocaleLowerCase();
+      const normalizedChatTitle = normalizeText(chatTitle).toLocaleLowerCase();
+      const matches = candidates.filter(({ thread }) => {
+        if (normalizedChatTitle && thread.chatTitle.toLocaleLowerCase() !== normalizedChatTitle) return false;
+        return thread.topic.toLocaleLowerCase() === normalizedQuery ||
+          thread.visibleText.toLocaleLowerCase().includes(normalizedQuery);
+      });
+      const selected = matches.find(({ thread }) => thread.topic.toLocaleLowerCase() === normalizedQuery) || matches[0];
+      if (!selected) {
+        throw new Error(`A visible eXpress thread matching "${query}" was not found. Use express_list_threads first.`);
+      }
 
-    await clickBackendNode(page, selected.row.backendDOMNodeId);
-    await waitForThreadHeader(page);
+      await clickBackendNode(page, selected.row.backendDOMNodeId);
+      await waitForThreadHeader(page);
+      thread = selected.thread;
+    }
     await assertAllowed?.();
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     const allMessages = await collectDomMessageHistory(page, historyPages, messageLimit);
     const parentIndex = allMessages.findIndex((message) =>
-      normalizeText(message.text).toLocaleLowerCase() === selected.thread.topic.toLocaleLowerCase());
+      normalizeText(message.text).toLocaleLowerCase() === normalizeText(thread.topic).toLocaleLowerCase());
     const fallbackParentIndex = allMessages.length ? 0 : -1;
     const actualParentIndex = parentIndex >= 0 ? parentIndex : fallbackParentIndex;
     const parent = actualParentIndex >= 0 ? allMessages[actualParentIndex] : null;
     const messages = allMessages.filter((_, index) => index !== actualParentIndex);
 
     return {
-      thread: selected.thread,
+      thread,
       parent,
       messages: messages.slice(-messageLimit),
       messageCount: Math.min(messages.length, messageLimit),
       loadedMessageCount: messages.length,
       detection: "express-dom-snapshot",
       closedAfterRead: closeAfter,
+      reusedOpenThread,
       note: "Opening a thread can mark its messages as read in eXpress.",
     };
   } finally {
